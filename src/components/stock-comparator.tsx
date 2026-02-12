@@ -21,7 +21,7 @@ import {
 } from '@/components/ui/card';
 import { useToast } from '@/hooks/use-toast';
 import { Loader2 } from 'lucide-react';
-import { generateAnalysisFile } from '@/ai/flows/generate-analysis-file';
+import { generateAnalysisFile } from '@/app/actions';
 import {
   Table,
   TableBody,
