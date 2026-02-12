@@ -3,6 +3,8 @@ import { Package } from "lucide-react";
 import { Toaster } from "@/components/ui/toaster";
 import { StockComparator } from "@/components/stock-comparator";
 
+export const maxDuration = 300; // 5 minutes
+
 export default function Home() {
   return (
     <div className="min-h-screen bg-background text-foreground flex flex-col">
