@@ -105,7 +105,14 @@ const readFileFromBase64 = (base64: string, fileName: string): any[] => {
         const workbook = XLSX.read(base64, { type: 'base64', cellDates: true, raw: false });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
-        return XLSX.utils.sheet_to_json(worksheet, { raw: false });
+        if (!worksheet) {
+          throw new Error(`La hoja de cálculo '${sheetName}' no se encontró o está vacía.`);
+        }
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { raw: false });
+        if (jsonData.length === 0) {
+            throw new Error('El archivo no contiene datos o está en un formato incorrecto.');
+        }
+        return jsonData;
     } catch (error: any) {
         console.error(`Error reading ${fileName} file`, error);
         throw new Error(`No se pudo leer el archivo ${fileName}. Asegúrate que es un formato .xlsx válido. Detalle: ${error.message}`);
@@ -136,127 +143,168 @@ export async function generateAnalysisFile(
         }
     };
 
-    // Process SAP Data
+    // --- Process SAP Data ---
     try {
         const sapData = readFileFromBase64(input.sapFileB64, "SAP");
-        if (sapData.length === 0) {
-          throw new Error('El archivo SAP está vacío o no se pudo leer.');
+        
+        const firstRow = sapData[0];
+        if (!firstRow) {
+            throw new Error('El archivo SAP está vacío o no tiene encabezados.');
         }
 
-        const sapSkuHeader = findHeader(sapData[0], SKU_SYNONYMS);
-        const sapQtyHeader = findHeader(sapData[0], QTY_SYNONYMS);
-        const sapCentroHeader = findHeader(sapData[0], CENTRO_SYNONYMS);
-        const sapDescHeader = findHeader(sapData[0], NOMBRE_PROD_SYNONYMS);
-        const sapAreaSapHeader = findHeader(sapData[0], WMS_AREA_SAP_SYNONYMS);
+        const sapSkuHeader = findHeader(firstRow, SKU_SYNONYMS);
+        const sapQtyHeader = findHeader(firstRow, QTY_SYNONYMS);
+        const sapCentroHeader = findHeader(firstRow, CENTRO_SYNONYMS);
+        const sapDescHeader = findHeader(firstRow, NOMBRE_PROD_SYNONYMS);
+        const sapAreaSapHeader = findHeader(firstRow, WMS_AREA_SAP_SYNONYMS);
 
         if (!sapSkuHeader || !sapQtyHeader || !sapAreaSapHeader || !sapCentroHeader) {
-            throw new Error('No se encontraron las columnas requeridas en el archivo SAP (SKU, Cantidad, Almacén, o Centro).');
+            const missing = [
+                !sapSkuHeader && 'SKU/Material',
+                !sapQtyHeader && 'Cantidad/Stock',
+                !sapAreaSapHeader && 'Almacén/AREA SAP',
+                !sapCentroHeader && 'Centro'
+            ].filter(Boolean).join(', ');
+            throw new Error(`Columnas requeridas no encontradas en archivo SAP: ${missing}.`);
         }
 
-        sapData.forEach(row => {
-            const areaSap = String(row[sapAreaSapHeader!] || '').trim().toUpperCase();
-            if (areaSap !== 'PT01') return;
+        sapData.forEach((row, index) => {
+             try {
+                const areaSap = String(row[sapAreaSapHeader!] || '').trim().toUpperCase();
+                if (areaSap !== 'PT01') return;
 
-            const sku = String(row[sapSkuHeader] || '').trim();
-            const qty = parseFloat(String(row[sapQtyHeader]).replace(/,/g, ''));
-            if (sku && !isNaN(qty)) {
-                ensureSku(sku);
-                const entry = dataMap.get(sku)!;
-                entry.sapQty += qty;
+                const sku = String(row[sapSkuHeader] || '').trim();
+                const qtyStr = String(row[sapQtyHeader] || '0').replace(/,/g, '');
+                const qty = parseFloat(qtyStr);
 
-                const centro = String(row[sapCentroHeader!] || '').trim();
-                if (centro && !skuToCentroMap.has(sku)) {
-                    skuToCentroMap.set(sku, centro);
+                if (sku && !isNaN(qty)) {
+                    ensureSku(sku);
+                    const entry = dataMap.get(sku)!;
+                    entry.sapQty += qty;
+
+                    const centro = String(row[sapCentroHeader!] || '').trim();
+                    if (centro && !skuToCentroMap.has(sku)) {
+                        skuToCentroMap.set(sku, centro);
+                    }
+
+                    if (!entry.centro) entry.centro = centro;
+                    if (!entry.nombreProd && sapDescHeader) entry.nombreProd = row[sapDescHeader];
                 }
-
-                if (!entry.centro) entry.centro = centro;
-                if (!entry.nombreProd && sapDescHeader) entry.nombreProd = row[sapDescHeader];
-            }
+             } catch(e: any) {
+                throw new Error(`Error en fila ${index + 2} del archivo SAP: ${e.message}`);
+             }
         });
     } catch (e: any) {
-        throw new Error(`Error procesando archivo SAP: ${e.message}`);
+        throw new Error(`[Paso 1: SAP] - ${e.message}`);
     }
 
 
-    // Process WMS Data
+    // --- Process WMS Data ---
     try {
         const wmsData = readFileFromBase64(input.wmsFileB64, "WMS");
-        if (wmsData.length === 0) {
-          throw new Error('El archivo WMS está vacío o no se pudo leer.');
+
+        const firstRow = wmsData[0];
+        if (!firstRow) {
+            throw new Error('El archivo WMS está vacío o no tiene encabezados.');
         }
 
-        const wmsSkuHeader = findHeader(wmsData[0], SKU_SYNONYMS);
-        const wmsQtyHeader = findHeader(wmsData[0], QTY_SYNONYMS);
-        const wmsAreaHeader = findHeader(wmsData[0], AREA_SYNONYMS);
-        const wmsAreaSapHeader = findHeader(wmsData[0], WMS_AREA_SAP_SYNONYMS);
-        const wmsUbicacionHeader = findHeader(wmsData[0], UBICACION_SYNONYMS);
+        const wmsSkuHeader = findHeader(firstRow, SKU_SYNONYMS);
+        const wmsQtyHeader = findHeader(firstRow, QTY_SYNONYMS);
+        const wmsAreaHeader = findHeader(firstRow, AREA_SYNONYMS);
+        const wmsAreaSapHeader = findHeader(firstRow, WMS_AREA_SAP_SYNONYMS);
+        const wmsUbicacionHeader = findHeader(firstRow, UBICACION_SYNONYMS);
 
         if (!wmsSkuHeader || !wmsQtyHeader || !wmsAreaHeader || !wmsUbicacionHeader || !wmsAreaSapHeader) {
-            throw new Error('No se encontraron las columnas requeridas en el archivo WMS (SKU, Cantidad, Área, Ubicación, or AREA SAP).');
+             const missing = [
+                !wmsSkuHeader && 'SKU/Material',
+                !wmsQtyHeader && 'Cantidad',
+                !wmsAreaHeader && 'Área',
+                !wmsUbicacionHeader && 'Ubicación',
+                !wmsAreaSapHeader && 'AREA SAP/Almacén'
+            ].filter(Boolean).join(', ');
+            throw new Error(`Columnas requeridas no encontradas en archivo WMS: ${missing}.`);
         }
 
-        wmsData.forEach(row => {
-            const sku = String(row[wmsSkuHeader!] || '').trim();
-            const qty = parseFloat(String(row[wmsQtyHeader!]).replace(/,/g, ''));
+        wmsData.forEach((row, index) => {
+            try {
+                const sku = String(row[wmsSkuHeader!] || '').trim();
+                const qtyStr = String(row[wmsQtyHeader!] || '0').replace(/,/g, '');
+                const qty = parseFloat(qtyStr);
 
-            if (!sku || isNaN(qty)) return;
+                if (!sku || isNaN(qty)) return;
 
-            ensureSku(sku);
-            const entry = dataMap.get(sku)!;
+                ensureSku(sku);
+                const entry = dataMap.get(sku)!;
 
-            const areaSap = String(row[wmsAreaSapHeader!] || '').trim().toUpperCase();
-            if (areaSap === 'PT01') {
-                entry.wmsQty += qty;
-            }
+                const areaSap = String(row[wmsAreaSapHeader!] || '').trim().toUpperCase();
+                if (areaSap === 'PT01') {
+                    entry.wmsQty += qty;
+                }
 
-            const area = String(row[wmsAreaHeader!] || '').trim().toUpperCase();
-            const ubicacion = String(row[wmsUbicacionHeader!] || '').trim();
-            if (area.startsWith("AREA STAGE") && ubicacion.startsWith("7")) {
-                entry.stockParaTraslado += qty;
+                const area = String(row[wmsAreaHeader!] || '').trim().toUpperCase();
+                const ubicacion = String(row[wmsUbicacionHeader!] || '').trim();
+                if (area.startsWith("AREA STAGE") && ubicacion.startsWith("7")) {
+                    entry.stockParaTraslado += qty;
+                }
+            } catch (e: any) {
+                throw new Error(`Error en fila ${index + 2} del archivo WMS: ${e.message}`);
             }
         });
     } catch(e: any) {
-        throw new Error(`Error procesando archivo WMS: ${e.message}`);
+        throw new Error(`[Paso 2: WMS] - ${e.message}`);
     }
 
 
-    // Process Adjustments Data
+    // --- Process Adjustments Data ---
     try {
         if (input.adjustmentsFileB64 && input.adjustmentsFileB64.length > 0) {
             const adjustmentsData = readFileFromBase64(input.adjustmentsFileB64, "Ajustes");
             if (adjustmentsData.length === 0) return;
 
-            const adjSkuHeader = findHeader(adjustmentsData[0], SKU_SYNONYMS);
-            const adjQtyHeader = findHeader(adjustmentsData[0], QTY_SYNONYMS);
-            const adjClaseMovHeader = findHeader(adjustmentsData[0], CLASE_MOV_SYNONYMS);
+            const firstRow = adjustmentsData[0];
+            if (!firstRow) return; // Optional file can be empty
+
+            const adjSkuHeader = findHeader(firstRow, SKU_SYNONYMS);
+            const adjQtyHeader = findHeader(firstRow, QTY_SYNONYMS);
+            const adjClaseMovHeader = findHeader(firstRow, CLASE_MOV_SYNONYMS);
 
             if (!adjSkuHeader || !adjQtyHeader || !adjClaseMovHeader) {
-                console.warn("Saltando archivo de ajustes por falta de columnas (SKU, Cantidad, o Clase Mov).");
+                const missing = [
+                    !adjSkuHeader && 'SKU/Material',
+                    !adjQtyHeader && 'Cantidad',
+                    !adjClaseMovHeader && 'Clase de Movimiento',
+                ].filter(Boolean).join(', ');
+                console.warn(`Saltando archivo de ajustes por falta de columnas: ${missing}.`);
                 return;
             }
             
             const difInvMovs = ['Z59', 'Z60', 'Z65', 'Z66'];
-            adjustmentsData.forEach(row => {
-                const sku = String(row[adjSkuHeader!] || '').trim();
-                const qty = parseFloat(String(row[adjQtyHeader!]).replace(/,/g, ''));
-                const claseMov = String(row[adjClaseMovHeader!] || '').trim().toUpperCase();
+            adjustmentsData.forEach((row, index) => {
+                try {
+                    const sku = String(row[adjSkuHeader!] || '').trim();
+                    const qtyStr = String(row[adjQtyHeader!] || '0').replace(/,/g, '');
+                    const qty = parseFloat(qtyStr);
+                    const claseMov = String(row[adjClaseMovHeader!] || '').trim().toUpperCase();
 
-                if (sku && !isNaN(qty) && claseMov) {
-                    const centro = skuToCentroMap.get(sku) || 'INDEFINIDO';
+                    if (sku && !isNaN(qty) && claseMov) {
+                        const centro = skuToCentroMap.get(sku) || 'INDEFINIDO';
 
-                    if (difInvMovs.includes(claseMov)) {
-                        ensureSku(sku);
-                        dataMap.get(sku)!.adjustment += qty;
-                    } else if (claseMov === 'Z42') {
-                        mermaByCentro.set(centro, (mermaByCentro.get(centro) || 0) + qty);
-                    } else if (claseMov === 'Z44') {
-                        vencimientoByCentro.set(centro, (vencimientoByCentro.get(centro) || 0) + qty);
+                        if (difInvMovs.includes(claseMov)) {
+                            ensureSku(sku);
+                            dataMap.get(sku)!.adjustment += qty;
+                        } else if (claseMov === 'Z42') {
+                            mermaByCentro.set(centro, (mermaByCentro.get(centro) || 0) + qty);
+                        } else if (claseMov === 'Z44') {
+                            vencimientoByCentro.set(centro, (vencimientoByCentro.get(centro) || 0) + qty);
+                        }
                     }
+                } catch(e: any) {
+                    throw new Error(`Error en fila ${index + 2} del archivo de Ajustes: ${e.message}`);
                 }
             });
         }
     } catch(e: any) {
-        throw new Error(`Error procesando archivo de Ajustes: ${e.message}`);
+        throw new Error(`[Paso 3: Ajustes] - ${e.message}`);
     }
 
 
@@ -280,19 +328,21 @@ export async function generateAnalysisFile(
             };
         }).filter(entry => entry['Stock SAP'] !== 0 || entry['Stock WMS'] !== 0 || entry['Ajuste Mensual (Dif. Inventario)'] !== 0);
     } catch(e: any) {
-        throw new Error(`Error generando el reporte final: ${e.message}`);
+        throw new Error(`[Paso 4: Reporte] - Error generando el reporte final: ${e.message}`);
     }
     
 
     // --- Create and return Excel file ---
     let outputBase64: string;
+    let mermaReport: any[] = [];
+    let vencimientoReport: any[] = [];
     try {
         const newWorkbook = XLSX.utils.book_new();
         
         const mainWorksheet = XLSX.utils.json_to_sheet(finalReport);
         XLSX.utils.book_append_sheet(newWorkbook, mainWorksheet, "Análisis de Stock");
         
-        const mermaReport = Array.from(mermaByCentro.entries()).map(([centro, cantidad]) => ({
+        mermaReport = Array.from(mermaByCentro.entries()).map(([centro, cantidad]) => ({
             'Centro': centro,
             'Suma de Cantidad': cantidad
         }));
@@ -301,7 +351,7 @@ export async function generateAnalysisFile(
           XLSX.utils.book_append_sheet(newWorkbook, mermaWorksheet, "Merma (Z42)");
         }
 
-        const vencimientoReport = Array.from(vencimientoByCentro.entries()).map(([centro, cantidad]) => ({
+        vencimientoReport = Array.from(vencimientoByCentro.entries()).map(([centro, cantidad]) => ({
             'Centro': centro,
             'Suma de Cantidad': cantidad
         }));
@@ -312,15 +362,13 @@ export async function generateAnalysisFile(
 
         outputBase64 = XLSX.write(newWorkbook, { bookType: 'xlsx', type: 'base64' });
     } catch(e: any) {
-        throw new Error(`Error creando el archivo Excel de salida: ${e.message}`);
+        throw new Error(`[Paso 5: Excel] - Error creando el archivo Excel de salida: ${e.message}`);
     }
 
 
     // --- Generate data for UI charts/tables ---
     let summaryChartData: any[] = [];
     let diferenciaReport: any[] = [];
-    let mermaReport: any[] = [];
-    let vencimientoReport: any[] = [];
 
     try {
         const summaryByCentro = new Map<string, number>();
@@ -353,17 +401,8 @@ export async function generateAnalysisFile(
             }))
             .filter(item => item.Diferencia !== 0);
         
-        mermaReport = Array.from(mermaByCentro.entries()).map(([centro, cantidad]) => ({
-            'Centro': centro,
-            'Suma de Cantidad': cantidad
-        }));
-
-        vencimientoReport = Array.from(vencimientoByCentro.entries()).map(([centro, cantidad]) => ({
-            'Centro': centro,
-            'Suma de Cantidad': cantidad
-        }));
     } catch (e: any) {
-        throw new Error(`Error preparando datos para la UI: ${e.message}`);
+        throw new Error(`[Paso 6: UI Data] - Error preparando datos para la UI: ${e.message}`);
     }
 
 
