@@ -12,7 +12,7 @@ export default function Home() {
         <div className="container flex h-16 items-center justify-between">
           <div className="flex items-center">
             <Package className="h-6 w-6 text-primary" />
-            <span className="ml-2 font-bold text-lg">Stock Comparator</span>
+            <span className="ml-2 font-bold text-lg">Comparador de stock</span>
           </div>
           <span className="font-semibold text-lg">Inventario CD8000</span>
         </div>
